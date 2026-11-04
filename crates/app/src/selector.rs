@@ -391,7 +391,7 @@ struct State {
     erase_id: Option<u64>,
     /// Part of the picture changed since the DIBs were last written: redrawn once, just before painting, so a burst
     /// of mouse moves costs one render.
-    dirty: Option<Rect>,
+    dirty: Vec<Rect>,
     /// Mouse position while the toolbar itself is being dragged; once moved by hand it stays where it was put.
     bar_drag: Option<(i32, i32)>,
     bar_pinned: bool,
@@ -606,7 +606,7 @@ impl State {
                 edit: None,
                 erasing: false,
                 erase_id: None,
-                dirty: None,
+                dirty: Vec::new(),
                 bar_drag: None,
                 bar_pinned: false,
             };
@@ -671,20 +671,61 @@ impl State {
 
     /// Marks the whole picture as needing a redraw.
     fn refresh(&mut self) {
-        self.dirty = Some(self.full());
+        self.dirty = vec![self.full()];
     }
 
     /// Marks the area `r` as needing a redraw.
     fn refresh_rect(&mut self, r: Rect) {
-        self.dirty = Some(self.dirty.map_or(r, |d| d.union(&r)));
+        let Some(mut r) = r.intersect(&self.full()) else { return };
+        let mut i = 0;
+        while i < self.dirty.len() {
+            let d = self.dirty[i];
+            let union = d.union(&r);
+            if union.area() <= d.area() + r.area() {
+                r = union;
+                self.dirty.swap_remove(i);
+                i = 0;
+            } else {
+                i += 1;
+            }
+        }
+        self.dirty.push(r);
+        if self.dirty.len() > 64 {
+            self.refresh();
+        }
     }
 
     /// Redraws what changed (only that area, unless it is most of the picture) into the DIBs.
     fn flush(&mut self) {
-        let Some(r) = self.dirty.take() else { return };
-        let Some(r) = r.intersect(&self.full()) else { return };
-        if let Some((area, img)) = self.ed.doc.render_region(r) {
-            self.write_pixels_rect(&img, (area.x, area.y), area);
+        let mut painted: Vec<Rect> = Vec::new();
+        for r in std::mem::take(&mut self.dirty) {
+            if painted.iter().any(|p| p.intersect(&r) == Some(r)) {
+                continue;
+            }
+            if let Some((area, img)) = self.ed.doc.render_region(r) {
+                self.write_pixels_rect(&img, (area.x, area.y), area);
+                painted.push(area);
+            }
+        }
+    }
+
+    fn refresh_object(&mut self, o: &Object) {
+        if let Shape::Rect { a, b, fill: false } = o.shape {
+            let (lo, hi) = snapforge_core::editor::model::norm_rect(a, b);
+            let pad = (o.width / 2.0).ceil() as i32 + 2;
+            let (x, y) = (lo.x.floor() as i32 - pad, lo.y.floor() as i32 - pad);
+            let (w, h) = ((hi.x.ceil() as i32 - x + pad + 1), (hi.y.ceil() as i32 - y + pad + 1));
+            let band = 2 * pad + 1;
+            for r in [
+                Rect::new(x, y, w, band),
+                Rect::new(x, y + h - band, w, band),
+                Rect::new(x, y, band, h),
+                Rect::new(x + w - band, y, band, h),
+            ] {
+                self.refresh_rect(r);
+            }
+        } else {
+            self.refresh_rect(self.dirty_rect(o));
         }
     }
 
@@ -887,16 +928,16 @@ impl State {
         if o.shape == new {
             return;
         }
-        let before = self.dirty_rect(o);
+        let before = o.clone();
         if let Some(o) = self.ed.doc.get_mut(id) {
             o.shape = new;
         }
         if let Some(e) = &mut self.edit {
             e.changed = true;
         }
-        if let Some(o) = self.ed.doc.get(id) {
-            let r = before.union(&self.dirty_rect(o));
-            self.refresh_rect(r);
+        self.refresh_object(&before);
+        if let Some(o) = self.ed.doc.get(id).cloned() {
+            self.refresh_object(&o);
         }
     }
 
@@ -1087,7 +1128,7 @@ impl State {
 
     /// Adds the shape of the finished mouse drag (if it is big enough to be intentional).
     fn finish_draw(&mut self) {
-        let Some(d) = self.draw.take() else { return };
+        let Some(mut d) = self.draw.take() else { return };
         let end = if shift_down() {
             constrain(self.tool, d.start, self.cur)
         } else {
@@ -1100,6 +1141,9 @@ impl State {
         let long = (a.x - b.x).hypot(a.y - b.y) >= 3.0;
         let boxy = (a.x - b.x).abs() >= 3.0 && (a.y - b.y).abs() >= 3.0;
         let fill = self.fill;
+        if matches!(self.tool, Tool::Pencil | Tool::Marker) && d.pts.last() != Some(&b) {
+            d.pts.push(b);
+        }
         let shape = match self.tool {
             Tool::Rect if boxy => Some(Shape::Rect { a, b, fill }),
             Tool::Ellipse if boxy => Some(Shape::Ellipse { a, b, fill }),
@@ -1108,7 +1152,7 @@ impl State {
             Tool::Blur if boxy => Some(Shape::Blur { a, b, radius: 10 }),
             Tool::Pixelate if boxy => Some(Shape::Pixelate { a, b, block: 10 }),
             Tool::Spotlight if boxy => Some(Shape::Spotlight { a, b }),
-            Tool::Pencil if d.pts.len() > 1 => Some(Shape::Pencil { pts: d.pts }),
+            Tool::Pencil if !d.pts.is_empty() => Some(Shape::Pencil { pts: d.pts }),
             Tool::Marker if d.pts.len() > 1 => Some(Shape::Marker { pts: d.pts }),
             _ => None,
         };
@@ -1614,16 +1658,12 @@ impl State {
                     line(x + w, y, x + w - 1, y + 8);
                 }
                 Btn::Tool(Tool::Pencil) => {
-                    let pts = [
-                        (x, y + h - 2),
-                        (x + 5, y + 4),
-                        (x + 9, y + h - 4),
-                        (x + 14, y + 2),
-                        (x + w, y + 8),
-                    ];
-                    for p in pts.windows(2) {
-                        line(p[0].0, p[0].1, p[1].0, p[1].1);
-                    }
+                    line(x + 2, y + h - 6, x + w - 6, y + 2);
+                    line(x + 7, y + h - 1, x + w - 1, y + 7);
+                    line(x + w - 6, y + 2, x + w - 1, y + 7);
+                    line(x + 2, y + h - 6, x, y + h);
+                    line(x, y + h, x + 7, y + h - 1);
+                    line(x + w - 9, y + 5, x + w - 4, y + 10);
                 }
                 Btn::Tool(Tool::Marker) => {
                     let m = CreatePen(PS_SOLID, 8, rgb(250, 200, 60));
@@ -2440,13 +2480,13 @@ mod tests {
                 st.cur = p;
                 st.apply_edit();
             }
-            let pending = st.dirty.expect("the moves are collected, not drawn one by one");
+            let pending: i64 = st.dirty.iter().map(Rect::area).sum();
             assert!(
-                pending.area() < st.full().area() / 2,
+                pending < st.full().area() / 2,
                 "{pending:?} is a small part of the screen"
             );
             st.flush();
-            assert!(st.dirty.is_none());
+            assert!(st.dirty.is_empty());
             let grab = |st: &State| -> Vec<(u8, u8, u8)> {
                 (0..st.h)
                     .flat_map(|y| (0..st.w).map(move |x| (x, y)))
@@ -2457,6 +2497,76 @@ mod tests {
             st.refresh();
             st.flush();
             assert!(partial == grab(st), "the part redrawn looks exactly like a full redraw");
+        });
+    }
+
+    #[test]
+    fn resizing_a_large_outline_does_not_redraw_its_interior() {
+        with_state(base_request((0, 0), Tool::Rect), |st| {
+            draw_rect(st, (30, 30), (540, 340));
+            st.flush();
+            let i = st.handle_at((540, 340)).unwrap();
+            assert!(st.start_edit(Some(i)));
+            st.cur = (560, 360);
+            st.apply_edit();
+            assert!(st.dirty.iter().map(Rect::area).sum::<i64>() < st.full().area() / 2);
+            st.flush();
+            let expected = st.ed.doc.render();
+            for y in 0..st.h {
+                for x in 0..st.w {
+                    let p = expected.get_pixel(x as u32, y as u32).0;
+                    assert_eq!(st.pixel(x, y), (p[0], p[1], p[2]));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn pencil_click_leaves_a_dot_and_is_undoable() {
+        with_state(base_request((0, 0), Tool::Pencil), |st| {
+            st.cur = (100, 100);
+            st.draw = Some(Drag {
+                start: st.cur,
+                pts: vec![st.pt()],
+            });
+            st.finish_draw();
+            assert!(matches!(st.ed.doc.objects[0].shape, Shape::Pencil { .. }));
+            st.flush();
+            assert_ne!(st.pixel(100, 100), (30, 120, 200));
+            st.undo();
+            assert!(st.ed.doc.objects.is_empty());
+        });
+    }
+
+    #[test]
+    #[ignore = "manual 4K CPU redraw benchmark; no desktop input"]
+    fn benchmark_large_outline_resize() {
+        let mut req = base_request((0, 0), Tool::Rect);
+        req.frozen = RgbaImage::from_pixel(3840, 2160, snapforge_core::image::Rgba([30, 120, 200, 255]));
+        with_state(req, |st| {
+            draw_rect(st, (100, 100), (3500, 1900));
+            st.flush();
+            let i = st.handle_at((3500, 1900)).unwrap();
+            assert!(st.start_edit(Some(i)));
+            let start = std::time::Instant::now();
+            for n in 0..20 {
+                st.cur = (3500 + n, 1900 + n);
+                st.apply_edit();
+                st.flush();
+            }
+            eprintln!("4K resize CPU redraw: {:?}/frame", start.elapsed() / 20);
+            let start = std::time::Instant::now();
+            for n in 20..40 {
+                st.cur = (3500 + n, 1900 + n);
+                st.apply_edit();
+                let r = st.dirty.iter().copied().reduce(|a, b| a.union(&b)).unwrap();
+                st.dirty = vec![r];
+                st.flush();
+            }
+            eprintln!(
+                "4K resize previous bounding-box redraw: {:?}/frame",
+                start.elapsed() / 20
+            );
         });
     }
 

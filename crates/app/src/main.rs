@@ -153,6 +153,9 @@ impl App {
             Settings::load()
         };
         let history = History::open(&paths::history_dir());
+        if matches!(mode, Mode::App) {
+            cc.egui_ctx.set_zoom_factor(settings.ui_scale as f32 / 100.0);
+        }
         let (cap_tx, cap_rx) = channel();
         let (hk_tx, hotkey_rx) = channel();
         let (toast_tx, toast_rx) = channel();

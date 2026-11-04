@@ -622,6 +622,15 @@ impl App {
             *changed |= ui
                 .checkbox(&mut self.settings.overlay_privacy, tr(lang, "set.overlay_privacy"))
                 .changed();
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "set.drawing_color"));
+                *changed |= ui
+                    .color_edit_button_srgba_unmultiplied(&mut self.settings.overlay_color)
+                    .changed();
+            });
+            *changed |= ui
+                .add(egui::Slider::new(&mut self.settings.overlay_width, 1.0..=24.0).text(tr(lang, "ed.width")))
+                .changed();
             *changed |= ui
                 .checkbox(&mut self.settings.overlay_for_screens, tr(lang, "set.overlay_screens"))
                 .changed();

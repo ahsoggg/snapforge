@@ -436,16 +436,55 @@ impl App {
         area.show(ui, |ui| {
             ui.label(RichText::new(tr(lang, "set.title")).size(20.0).strong());
             ui.add_space(6.0);
-            self.hotkeys_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.overlay_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.video_card(ui, &mut changed);
-            ui.add_space(8.0);
-
             theme::card(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(tr(lang, "set.general")).strong());
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.ui_scale, 75..=200)
+                            .suffix("%")
+                            .text(tr(lang, "set.ui_scale")),
+                    )
+                    .changed()
+                {
+                    ctx.set_zoom_factor(self.settings.ui_scale as f32 / 100.0);
+                    changed = true;
+                }
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.editor_zoom_speed, 25..=200)
+                            .suffix("%")
+                            .text(tr(lang, "set.zoom_speed")),
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.editor_show_properties,
+                        tr(lang, "set.editor_properties"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.editor_tools_width, 140..=240)
+                            .text(tr(lang, "set.tools_width")),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.editor_properties_width, 200..=420)
+                            .text(tr(lang, "set.properties_width")),
+                    )
+                    .changed();
+                if ui.button(tr(lang, "set.interface_reset")).clicked() {
+                    let defaults = snapforge_core::settings::Settings::default();
+                    self.settings.ui_scale = defaults.ui_scale;
+                    self.settings.editor_zoom_speed = defaults.editor_zoom_speed;
+                    self.settings.editor_show_properties = defaults.editor_show_properties;
+                    self.settings.editor_tools_width = defaults.editor_tools_width;
+                    self.settings.editor_properties_width = defaults.editor_properties_width;
+                    ctx.set_zoom_factor(1.0);
+                    changed = true;
+                }
                 ui.horizontal(|ui| {
                     ui.label(tr(lang, "set.language"));
                     let before = self.settings.language;
@@ -478,6 +517,13 @@ impl App {
                     }
                 }
             });
+            ui.add_space(8.0);
+
+            self.hotkeys_card(ui, &mut changed);
+            ui.add_space(8.0);
+            self.overlay_card(ui, &mut changed);
+            ui.add_space(8.0);
+            self.video_card(ui, &mut changed);
             ui.add_space(8.0);
 
             theme::card(ui).show(ui, |ui| {

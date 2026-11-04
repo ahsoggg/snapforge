@@ -152,6 +152,10 @@ pub fn pos_to_pt(p: Pos2, origin: Pos2, scale: f32) -> Pt {
     Pt::new((p.x - origin.x) / scale, (p.y - origin.y) / scale)
 }
 
+fn zoom_scale(scale: f32, delta: f32, speed: u16) -> f32 {
+    (scale * delta.powf(speed as f32 / 100.0)).clamp(0.05, 16.0)
+}
+
 fn col(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
@@ -415,7 +419,7 @@ impl EditorState {
     }
 
     /// The canvas: draws the image and handles every pointer interaction.
-    pub fn canvas(&mut self, ui: &mut Ui) {
+    pub fn canvas(&mut self, ui: &mut Ui, zoom_speed: u16) {
         self.refresh_texture(ui.ctx());
         let avail = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(avail, Sense::click_and_drag());
@@ -433,11 +437,10 @@ impl EditorState {
 
         // zoom around the cursor (Ctrl + wheel), pan with the middle button
         if resp.hovered() {
-            let (scroll, ctrl, cursor) =
-                ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl, i.pointer.hover_pos()));
-            if let (true, true, Some(c)) = (ctrl, scroll != 0.0, cursor) {
+            let (delta, cursor) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
+            if let (true, Some(c)) = (delta != 1.0, cursor) {
                 let p = pos_to_pt(c, img_rect.min, scale);
-                let ns = (scale * 1.12_f32.powf(scroll.signum())).clamp(0.05, 16.0);
+                let ns = zoom_scale(scale, delta, zoom_speed);
                 let min = Pos2::new(c.x - p.x * ns, c.y - p.y * ns);
                 let new_center = min + vec2(iwf * ns, ihf * ns) / 2.0;
                 self.zoom = ns;
@@ -568,6 +571,11 @@ impl EditorState {
         {
             match tool {
                 Tool::Select => self.selected = self.ed.doc.hit_test(p, handle_reach),
+                Tool::Pencil => {
+                    self.ed.checkpoint();
+                    self.selected = Some(self.ed.doc.add(Shape::Pencil { pts: vec![p] }, self.color, self.width));
+                    self.dirty = true;
+                }
                 Tool::Eraser => {
                     // a click without dragging rubs out one spot
                     self.ed.checkpoint();
@@ -968,56 +976,64 @@ impl App {
                 }
             });
         });
-        egui::Panel::left("editor_tools").exact_size(140.0).show(ui, |ui| {
-            for tool in Tool::ALL {
-                let sel = es.tool == tool;
-                let label = match tool.shortcut() {
-                    Some((_, k)) => format!("{}  [{k}]", t(tool.key())),
-                    None => t(tool.key()).to_owned(),
-                };
-                if ui
-                    .add_sized([124.0, 26.0], egui::Button::selectable(sel, label))
-                    .clicked()
-                {
-                    es.tool = tool;
-                    es.crop = None;
-                    if tool != Tool::Select {
-                        es.selected = None;
+        egui::Panel::left("editor_tools")
+            .exact_size((self.settings.editor_tools_width as f32).min(ui.available_width() * 0.3))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for tool in Tool::ALL {
+                        let sel = es.tool == tool;
+                        let label = match tool.shortcut() {
+                            Some((_, k)) => format!("{}  [{k}]", t(tool.key())),
+                            None => t(tool.key()).to_owned(),
+                        };
+                        if ui
+                            .add_sized([ui.available_width(), 26.0], egui::Button::selectable(sel, label))
+                            .clicked()
+                        {
+                            es.tool = tool;
+                            es.crop = None;
+                            if tool != Tool::Select {
+                                es.selected = None;
+                            }
+                        }
                     }
-                }
-            }
-            let plugin_tools = self.plugins.host.tools();
-            if !plugin_tools.is_empty() {
-                ui.separator();
-                ui.label(egui::RichText::new(t("ed.plugin_tools")).weak().small());
-                for pt in &plugin_tools {
-                    let sel = es.tool == Tool::Plugin
-                        && es.plugin_tool.as_ref() == Some(&(pt.plugin_id.clone(), pt.id.clone()));
-                    if ui
-                        .add_sized([124.0, 26.0], egui::Button::selectable(sel, &pt.title))
-                        .on_hover_text(&pt.plugin_name)
-                        .clicked()
-                    {
-                        es.tool = Tool::Plugin;
-                        es.plugin_tool = Some((pt.plugin_id.clone(), pt.id.clone()));
-                        es.crop = None;
-                        es.selected = None;
+                    let plugin_tools = self.plugins.host.tools();
+                    if !plugin_tools.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(t("ed.plugin_tools")).weak().small());
+                        for pt in &plugin_tools {
+                            let sel = es.tool == Tool::Plugin
+                                && es.plugin_tool.as_ref() == Some(&(pt.plugin_id.clone(), pt.id.clone()));
+                            if ui
+                                .add_sized([124.0, 26.0], egui::Button::selectable(sel, &pt.title))
+                                .on_hover_text(&pt.plugin_name)
+                                .clicked()
+                            {
+                                es.tool = Tool::Plugin;
+                                es.plugin_tool = Some((pt.plugin_id.clone(), pt.id.clone()));
+                                es.crop = None;
+                                es.selected = None;
+                            }
+                        }
                     }
-                }
-            }
-            if es.tool == Tool::Crop && es.crop.is_some() {
-                ui.separator();
-                if theme::primary_button(ui, t("ed.apply_crop")).clicked() {
-                    es.apply_crop();
-                }
-            }
-        });
-        egui::Panel::right("editor_props").exact_size(280.0).show(ui, |ui| {
-            ui.spacing_mut().slider_width = 110.0;
-            es.properties(ui, &t);
-        });
+                    if es.tool == Tool::Crop && es.crop.is_some() {
+                        ui.separator();
+                        if theme::primary_button(ui, t("ed.apply_crop")).clicked() {
+                            es.apply_crop();
+                        }
+                    }
+                });
+            });
+        if self.settings.editor_show_properties {
+            egui::Panel::right("editor_props")
+                .exact_size((self.settings.editor_properties_width as f32).min(ui.available_width() * 0.5))
+                .show(ui, |ui| {
+                    ui.spacing_mut().slider_width = 110.0;
+                    egui::ScrollArea::vertical().show(ui, |ui| es.properties(ui, &t));
+                });
+        }
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-            es.canvas(ui);
+            es.canvas(ui, self.settings.editor_zoom_speed);
         });
         // a click with a plugin tool: the plugin works on the base picture and its result replaces it
         if let Some((pid, id, x, y)) = es.tool_click.take() {
@@ -1620,6 +1636,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_is_independent_of_event_splitting_and_reversible() {
+        let whole = zoom_scale(1.0, 1.4, 100);
+        let half = 1.4_f32.sqrt();
+        let split = zoom_scale(zoom_scale(1.0, half, 100), half, 100);
+        assert!((whole - split).abs() < 0.00001);
+        assert!((zoom_scale(whole, 1.0 / 1.4, 100) - 1.0).abs() < 0.00001);
+        assert!(zoom_scale(1.0, 1.4, 25) < whole);
+        assert_eq!(zoom_scale(16.0, 2.0, 200), 16.0);
+        assert_eq!(zoom_scale(0.05, 0.5, 200), 0.05);
+    }
 
     fn state() -> EditorState {
         let img = RgbaImage::from_pixel(200, 100, snapforge_core::image::Rgba([200, 200, 200, 255]));

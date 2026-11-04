@@ -179,6 +179,11 @@ impl ImageFormat {
 #[serde(default)]
 pub struct Settings {
     pub language: Lang,
+    pub ui_scale: u16,
+    pub editor_zoom_speed: u16,
+    pub editor_show_properties: bool,
+    pub editor_tools_width: u16,
+    pub editor_properties_width: u16,
     pub save_dir: PathBuf,
     pub name_template: String,
     pub format: ImageFormat,
@@ -236,6 +241,11 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             language: Lang::Ru,
+            ui_scale: 100,
+            editor_zoom_speed: 100,
+            editor_show_properties: true,
+            editor_tools_width: 140,
+            editor_properties_width: 280,
             save_dir: paths::default_pictures_dir(),
             name_template: naming::DEFAULT_TEMPLATE.to_owned(),
             format: ImageFormat::Png,
@@ -311,6 +321,10 @@ impl Settings {
         self.video_fps = self.video_fps.clamp(5, 60);
         self.jpeg_quality = self.jpeg_quality.clamp(1, 100);
         self.delay_ms = self.delay_ms.min(60_000);
+        self.ui_scale = self.ui_scale.clamp(75, 200);
+        self.editor_zoom_speed = self.editor_zoom_speed.clamp(25, 200);
+        self.editor_tools_width = self.editor_tools_width.clamp(140, 240);
+        self.editor_properties_width = self.editor_properties_width.clamp(200, 420);
         self.post.sanitize();
         self.overlay_width = self.overlay_width.clamp(1.0, 24.0);
         self.overlay_dim = self.overlay_dim.min(90);
@@ -380,6 +394,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_settings_migrate_roundtrip_and_stay_usable() {
+        let mut s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.ui_scale, 100);
+        assert_eq!(s.editor_zoom_speed, 100);
+        assert!(s.editor_show_properties);
+        s.ui_scale = 500;
+        s.editor_zoom_speed = 0;
+        s.editor_tools_width = 0;
+        s.editor_properties_width = 999;
+        s.editor_show_properties = false;
+        s.sanitize();
+        let loaded: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(loaded.ui_scale, 200);
+        assert_eq!(loaded.editor_zoom_speed, 25);
+        assert_eq!(loaded.editor_tools_width, 140);
+        assert_eq!(loaded.editor_properties_width, 420);
+        assert!(!loaded.editor_show_properties);
+    }
 
     #[test]
     fn the_new_look_and_sound_options_have_safe_defaults() {

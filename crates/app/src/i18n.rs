@@ -156,6 +156,25 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("set.title", "Настройки", "Settings"),
     ("set.general", "Общие", "General"),
     ("set.language", "Язык", "Language"),
+    ("set.ui_scale", "Масштаб интерфейса", "Interface scale"),
+    ("set.zoom_speed", "Скорость зума редактора", "Editor zoom speed"),
+    (
+        "set.editor_properties",
+        "Показывать панель свойств и слоёв",
+        "Show properties and layers panel",
+    ),
+    ("set.tools_width", "Ширина панели инструментов", "Tools panel width"),
+    (
+        "set.properties_width",
+        "Ширина панели свойств",
+        "Properties panel width",
+    ),
+    (
+        "set.interface_reset",
+        "Сбросить настройки интерфейса",
+        "Reset interface settings",
+    ),
+    ("set.drawing_color", "Цвет рисования:", "Drawing colour:"),
     (
         "set.tray",
         "Сворачивать в трей при закрытии окна",
