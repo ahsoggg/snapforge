@@ -16,7 +16,7 @@ const SETTLE: Duration = Duration::from_millis(900);
 /// The review step waits for OCR (slower in a debug build).
 const SETTLE_REVIEW: Duration = Duration::from_millis(3500);
 
-pub const STEPS: [&str; 11] = [
+pub const STEPS: [&str; 14] = [
     "home",
     "history",
     "post",
@@ -28,6 +28,9 @@ pub const STEPS: [&str; 11] = [
     "settings",
     "settings-post",
     "settings-uploads",
+    "settings-search",
+    "workspace-compact",
+    "workspace-profiles",
 ];
 
 pub struct Tour {
@@ -144,7 +147,8 @@ impl App {
             }
             "settings-post" => {
                 self.view = View::Settings;
-                self.settings_scroll = Some(1050.0);
+                self.settings_search = self.t("set.post").to_owned();
+                self.settings_scroll = Some(0.0);
             }
             "settings-uploads" => {
                 self.settings.uploads = snapforge_core::upload::UploadSettings {
@@ -163,7 +167,8 @@ impl App {
                     active: Some("demo1".into()),
                 };
                 self.view = View::Settings;
-                self.settings_scroll = Some(1750.0);
+                self.settings_search = self.t("up.title").to_owned();
+                self.settings_scroll = Some(0.0);
             }
             "editor" => {
                 self.pending = None;
@@ -235,7 +240,38 @@ impl App {
                 self.editor = Some(es);
                 self.view = View::Editor;
             }
-            "settings" => self.view = View::Settings,
+            "settings" => {
+                self.view = View::Settings;
+                self.settings_search.clear();
+                self.settings_scroll = Some(0.0);
+            }
+            "settings-search" => {
+                self.view = View::Settings;
+                self.settings_search = self.t("set.zoom_speed").to_owned();
+                self.settings_scroll = Some(0.0);
+            }
+            "workspace-compact" => {
+                self.settings.compact_ui = true;
+                self.settings.editor_tools_right = true;
+                self.settings.ui_scale = 200;
+                self.settings.editor_tools_width = 240;
+                self.settings.editor_properties_width = 420;
+                let _ = self.settings.create_workspace("Laptop");
+                self.workspace_name = "Laptop".into();
+                ctx.set_zoom_factor(2.0);
+                self.view = View::Editor;
+            }
+            "workspace-profiles" => {
+                self.settings.compact_ui = false;
+                self.settings.editor_tools_right = false;
+                self.settings.ui_scale = 100;
+                let _ = self.settings.create_workspace("Drawing");
+                self.workspace_name = "Drawing".into();
+                ctx.set_zoom_factor(1.0);
+                self.settings_search = self.t("ws.title").to_owned();
+                self.settings_scroll = Some(0.0);
+                self.view = View::Settings;
+            }
             _ => {}
         }
     }

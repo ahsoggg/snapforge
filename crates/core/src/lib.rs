@@ -24,6 +24,7 @@ pub mod sensitive;
 pub mod settings;
 pub mod shutter;
 pub mod upload;
+pub mod workspace;
 
 pub use image;
 pub use image::RgbaImage;

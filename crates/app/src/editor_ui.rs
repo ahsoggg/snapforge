@@ -57,25 +57,8 @@ impl Tool {
         Tool::Picker,
     ];
 
-    /// The single key that selects the tool while no text field has focus.
-    pub fn shortcut(self) -> Option<(Key, &'static str)> {
-        Some(match self {
-            Tool::Select => (Key::V, "V"),
-            Tool::Crop => (Key::C, "C"),
-            Tool::Arrow => (Key::A, "A"),
-            Tool::Line => (Key::L, "L"),
-            Tool::Rect => (Key::R, "R"),
-            Tool::Ellipse => (Key::E, "E"),
-            Tool::Text => (Key::T, "T"),
-            Tool::Pencil => (Key::P, "P"),
-            Tool::Marker => (Key::M, "M"),
-            Tool::Blur => (Key::B, "B"),
-            Tool::Pixelate => (Key::X, "X"),
-            Tool::Spotlight => (Key::H, "H"),
-            Tool::Step => (Key::N, "N"),
-            Tool::Picker => (Key::I, "I"),
-            Tool::Chart | Tool::Eraser | Tool::Plugin => return None,
-        })
+    fn shortcut(self, settings: &snapforge_core::settings::Settings) -> Option<Key> {
+        Key::from_name(settings.editor_key(self.key()))
     }
 
     pub fn key(self) -> &'static str {
@@ -150,6 +133,41 @@ pub struct ChartDialog {
 
 pub fn pos_to_pt(p: Pos2, origin: Pos2, scale: f32) -> Pt {
     Pt::new((p.x - origin.x) / scale, (p.y - origin.y) / scale)
+}
+
+fn panel_header(ui: &mut Ui, title: &str, tools: bool, hint: &str) -> bool {
+    let response = ui
+        .add(egui::Label::new(format!("↔ {title}")).sense(Sense::drag()))
+        .on_hover_text(hint);
+    response.dnd_set_drag_payload(tools);
+    let swap = response
+        .dnd_release_payload::<bool>()
+        .is_some_and(|other| *other != tools);
+    ui.separator();
+    swap
+}
+
+fn resize_panel(ui: &Ui, rect: ERect, right: bool, id: &'static str, width: &mut u16, min: f32, max: f32) -> bool {
+    if max < min {
+        return false;
+    }
+    let edge = if right { rect.left() } else { rect.right() };
+    let grip = ERect::from_min_max(Pos2::new(edge - 4.0, rect.top()), Pos2::new(edge + 4.0, rect.bottom()));
+    let response = ui.interact(grip, egui::Id::new(id), Sense::drag());
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if response.dragged()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let desired = if right {
+            rect.right() - pos.x
+        } else {
+            pos.x - rect.left()
+        };
+        *width = desired.clamp(min.min(max), max).round() as u16;
+    }
+    response.drag_stopped()
 }
 
 fn zoom_scale(scale: f32, delta: f32, speed: u16) -> f32 {
@@ -976,18 +994,32 @@ impl App {
                 }
             });
         });
-        egui::Panel::left("editor_tools")
-            .exact_size((self.settings.editor_tools_width as f32).min(ui.available_width() * 0.3))
+        let mut swap_panels = false;
+        let tools_max = (ui.available_width() * 0.3).clamp(80.0, 240.0);
+        let tools_panel = if self.settings.editor_tools_right {
+            egui::Panel::right("editor_tools")
+        } else {
+            egui::Panel::left("editor_tools")
+        };
+        let tools_response = tools_panel
+            .exact_size((self.settings.editor_tools_width as f32).min(tools_max))
+            .resizable(false)
             .show(ui, |ui| {
+                swap_panels |= panel_header(ui, t("ws.tools"), true, t("ws.panel_drag_hint"));
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for tool in Tool::ALL {
                         let sel = es.tool == tool;
-                        let label = match tool.shortcut() {
-                            Some((_, k)) => format!("{}  [{k}]", t(tool.key())),
-                            None => t(tool.key()).to_owned(),
+                        let key = self.settings.editor_key(tool.key());
+                        let label = if key.is_empty() {
+                            t(tool.key()).to_owned()
+                        } else {
+                            format!("{}  [{key}]", t(tool.key()))
                         };
                         if ui
-                            .add_sized([ui.available_width(), 26.0], egui::Button::selectable(sel, label))
+                            .add_sized(
+                                [ui.available_width(), if self.settings.compact_ui { 22.0 } else { 26.0 }],
+                                egui::Button::selectable(sel, label),
+                            )
                             .clicked()
                         {
                             es.tool = tool;
@@ -1024,13 +1056,46 @@ impl App {
                     }
                 });
             });
+        let mut layout_changed = resize_panel(
+            ui,
+            tools_response.response.rect,
+            self.settings.editor_tools_right,
+            "workspace_tools_resize",
+            &mut self.settings.editor_tools_width,
+            140.0,
+            tools_max,
+        );
         if self.settings.editor_show_properties {
-            egui::Panel::right("editor_props")
-                .exact_size((self.settings.editor_properties_width as f32).min(ui.available_width() * 0.5))
+            let props_max = (ui.available_width() * 0.5).clamp(100.0, 420.0);
+            let props_panel = if self.settings.editor_tools_right {
+                egui::Panel::left("editor_props")
+            } else {
+                egui::Panel::right("editor_props")
+            };
+            let props_response = props_panel
+                .exact_size((self.settings.editor_properties_width as f32).min(props_max))
+                .resizable(false)
                 .show(ui, |ui| {
-                    ui.spacing_mut().slider_width = 110.0;
+                    swap_panels |= panel_header(ui, t("ws.properties"), false, t("ws.panel_drag_hint"));
+                    ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(40.0, 110.0);
                     egui::ScrollArea::vertical().show(ui, |ui| es.properties(ui, &t));
                 });
+            layout_changed |= resize_panel(
+                ui,
+                props_response.response.rect,
+                !self.settings.editor_tools_right,
+                "workspace_props_resize",
+                &mut self.settings.editor_properties_width,
+                200.0,
+                props_max,
+            );
+        }
+        if swap_panels {
+            self.settings.editor_tools_right = !self.settings.editor_tools_right;
+            layout_changed = true;
+        }
+        if layout_changed {
+            self.save_settings();
         }
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
             es.canvas(ui, self.settings.editor_zoom_speed);
@@ -1063,7 +1128,7 @@ impl App {
                 }
                 Tool::ALL
                     .into_iter()
-                    .find(|t| t.shortcut().is_some_and(|(k, _)| i.key_pressed(k)))
+                    .find(|t| t.shortcut(&self.settings).is_some_and(|k| i.key_pressed(k)))
             });
             if let Some(tool) = pressed {
                 es.tool = tool;
@@ -1638,6 +1703,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_panel_can_be_resized_and_saved_when_the_viewport_clamps_its_old_width() {
+        let ctx = egui::Context::default();
+        let mut width = 240;
+        let mut stopped = false;
+        let point = |x| Pos2::new(x, 80.0);
+        let button = |x, pressed| egui::Event::PointerButton {
+            pos: point(x),
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(point(180.0))],
+            vec![button(180.0, true)],
+            vec![egui::Event::PointerMoved(point(150.0))],
+            vec![button(150.0, false)],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(ERect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                stopped |= resize_panel(
+                    ui,
+                    ERect::from_min_size(Pos2::ZERO, vec2(180.0, 200.0)),
+                    false,
+                    "test_resize",
+                    &mut width,
+                    140.0,
+                    180.0,
+                );
+            });
+            output.textures_delta.clear();
+        }
+        assert!(stopped);
+        assert_eq!(width, 150);
+        let mut settings = snapforge_core::settings::Settings {
+            editor_tools_width: width,
+            ..Default::default()
+        };
+        settings.create_workspace("Small window").unwrap();
+        settings.editor_tools_width = 240;
+        settings.activate_workspace(0).unwrap();
+        assert_eq!(settings.editor_tools_width, 150);
+    }
+
+    #[test]
     fn zoom_is_independent_of_event_splitting_and_reversible() {
         let whole = zoom_scale(1.0, 1.4, 100);
         let half = 1.4_f32.sqrt();
@@ -1676,10 +1789,27 @@ mod tests {
 
     #[test]
     fn every_tool_shortcut_is_unique() {
-        let mut keys: Vec<_> = Tool::ALL.iter().filter_map(|t| t.shortcut().map(|(_, k)| k)).collect();
+        let mut settings = snapforge_core::settings::Settings::default();
+        let mut keys: Vec<_> = Tool::ALL.iter().map(|t| settings.editor_key(t.key())).collect();
+        assert!(Tool::ALL.iter().all(|t| t.shortcut(&settings).is_some()));
         let n = keys.len();
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), n);
+        settings
+            .editor_keys
+            .iter_mut()
+            .find(|(tool, _)| tool == "tool.pencil")
+            .unwrap()
+            .1 = "Q".into();
+        assert_eq!(Tool::Pencil.shortcut(&settings), Some(Key::Q));
+        settings
+            .editor_keys
+            .iter_mut()
+            .find(|(tool, _)| tool == "tool.pencil")
+            .unwrap()
+            .1
+            .clear();
+        assert_eq!(Tool::Pencil.shortcut(&settings), None);
     }
 }

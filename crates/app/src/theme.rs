@@ -57,6 +57,16 @@ pub fn card(ui: &Ui) -> egui::Frame {
         .inner_margin(Margin::same(10))
 }
 
+pub fn set_compact(ctx: &egui::Context, compact: bool) {
+    for theme in [Theme::Dark, Theme::Light] {
+        ctx.style_mut_of(theme, |s| {
+            s.spacing.item_spacing = if compact { vec2(5.0, 3.0) } else { vec2(8.0, 6.0) };
+            s.spacing.button_padding = if compact { vec2(6.0, 2.0) } else { vec2(10.0, 4.0) };
+            s.spacing.interact_size.y = if compact { 20.0 } else { 24.0 };
+        });
+    }
+}
+
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(egui::RichText::new(text).strong().color(Color32::from_rgb(12, 20, 36)))

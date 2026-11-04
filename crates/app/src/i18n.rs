@@ -8,12 +8,101 @@ use snapforge_core::settings::Lang;
 
 /// `(key, русский, English)`. `{name}` placeholders are filled by `App::tf`.
 const TABLE: &[(&str, &str, &str)] = &[
+    ("ws.properties", "Свойства", "Properties"),
     // navigation
     ("nav.home", "Главная", "Home"),
     ("nav.history", "История", "History"),
     ("nav.editor", "Редактор", "Editor"),
     ("nav.settings", "Настройки", "Settings"),
     ("common.cancel", "Отмена", "Cancel"),
+    // workspace and settings search
+    ("ws.title", "Рабочие пространства", "Workspaces"),
+    ("ws.manual", "Ручная настройка", "Manual layout"),
+    ("ws.name", "Название", "Name"),
+    (
+        "ws.create",
+        "Создать из текущих настроек",
+        "Create from current settings",
+    ),
+    ("ws.save", "Сохранить текущую компоновку", "Save current layout"),
+    ("ws.rename", "Переименовать", "Rename"),
+    ("ws.delete", "Удалить профиль…", "Delete profile…"),
+    (
+        "ws.delete_confirm",
+        "Удалить сохранённый профиль",
+        "Delete saved profile",
+    ),
+    (
+        "ws.delete_hint",
+        "Удалится только профиль. Снимки и текущая компоновка сохранятся.",
+        "Only the saved profile is removed. Images and the current layout stay as they are.",
+    ),
+    (
+        "ws.modified",
+        "Компоновка изменена — сохраните её в профиль вручную.",
+        "Layout modified — save it to the profile manually.",
+    ),
+    (
+        "ws.help",
+        "Профили хранят компоновку, масштаб и клавиши инструментов. Изменения сохраняются в профиль только кнопкой «Сохранить».",
+        "Profiles store layout, scale and tool keys. Changes update a profile only when you click Save.",
+    ),
+    (
+        "ws.err_name",
+        "Введите название от 1 до 64 символов без управляющих знаков.",
+        "Enter a name of 1–64 characters without control characters.",
+    ),
+    (
+        "ws.err_duplicate",
+        "Профиль с таким названием уже есть.",
+        "A profile with that name already exists.",
+    ),
+    (
+        "ws.err_limit",
+        "Можно сохранить не больше 32 профилей.",
+        "You can save up to 32 profiles.",
+    ),
+    (
+        "ws.err_missing",
+        "Сначала выберите сохранённый профиль.",
+        "Select a saved profile first.",
+    ),
+    ("ws.compact", "Компактный интерфейс", "Compact mode"),
+    (
+        "ws.tools_right",
+        "Панель инструментов справа",
+        "Tools panel on the right",
+    ),
+    ("ws.search", "Поиск настроек", "Search settings"),
+    ("ws.no_results", "Настройки не найдены.", "No settings found."),
+    ("ws.tools", "Инструменты", "Tools"),
+    (
+        "ws.panel_drag_hint",
+        "Перетащите заголовок на заголовок другой панели, чтобы поменять их местами; тяните внутреннюю границу для изменения ширины.",
+        "Drag this title onto the other panel title to swap sides; drag the inner border to resize.",
+    ),
+    (
+        "ws.editor_tools",
+        "Клавиши инструментов редактора",
+        "Editor tool shortcuts",
+    ),
+    (
+        "ws.keys_hint",
+        "A–Z, 0–9, F1–F12. Пустое поле отключает клавишу. Каждая клавиша может вызывать только один инструмент.",
+        "A–Z, 0–9, F1–F12. Leave blank to disable a key. Each key can select only one tool.",
+    ),
+    (
+        "ws.key_invalid",
+        "Допустимы A–Z, 0–9 или F1–F12.",
+        "Use A–Z, 0–9 or F1–F12.",
+    ),
+    (
+        "ws.key_duplicate",
+        "Клавиша уже назначена другому инструменту.",
+        "This key is assigned to another tool.",
+    ),
+    ("ws.keys_apply", "Применить клавиши", "Apply shortcuts"),
+    ("ws.keys_reset", "Сбросить клавиши", "Reset shortcuts"),
     // capture actions
     ("act.region", "Область", "Region"),
     ("act.window", "Окно", "Window"),
@@ -245,8 +334,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "set.updates_note",
-        "Это единственный сетевой запрос по умолчанию: он спрашивает api.github.com о последнем релизе. Телеметрии нет.",
-        "This is the only network request by default: it asks api.github.com for the latest release. There is no telemetry.",
+        "Проверка на GitHub при запуске и раз в сутки, пока приложение открыто; после ошибки — через 5 минут. Загрузки проверяются по SHA-256. Перезапуск вручную. Телеметрии нет.",
+        "Checks GitHub on launch and daily while the app is open; retries failures after 5 minutes. Downloads are verified with SHA-256. Restart manually. No telemetry.",
     ),
     ("set.system", "Система", "System"),
     ("set.portable", "Запущена переносная копия.", "This is a portable copy."),
@@ -298,6 +387,17 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("upd.retry", "Повторить загрузку ({v})", "Retry download ({v})"),
     ("upd.install", "Установить", "Install"),
     ("upd.check_now", "Проверить сейчас", "Check now"),
+    (
+        "upd.auto_install",
+        "Скачивать и устанавливать обновления автоматически; перезапуск вручную",
+        "Download and install updates automatically; restart manually",
+    ),
+    ("upd.retry_check", "Повторить проверку обновлений", "Retry update check"),
+    (
+        "upd.restart_failed",
+        "Не удалось перезапустить; приложение остаётся открытым",
+        "Could not restart; application stays open",
+    ),
     // tray
     ("tray.show", "Открыть SnapForge", "Open SnapForge"),
     ("tray.region", "Снимок области", "Capture region"),
@@ -962,6 +1062,27 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
     }
 }
 
+/// Match every query word against the keys and both translations of selected settings.
+pub fn settings_matches(query: &str, prefixes: &[&str]) -> bool {
+    let query = query.to_lowercase();
+    if query.trim().is_empty() {
+        return true;
+    }
+    let mut haystack = String::new();
+    for (key, ru, en) in TABLE {
+        if prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+            haystack.push_str(key);
+            haystack.push(' ');
+            haystack.push_str(ru);
+            haystack.push(' ');
+            haystack.push_str(en);
+            haystack.push(' ');
+        }
+    }
+    let haystack = haystack.to_lowercase();
+    query.split_whitespace().all(|word| haystack.contains(word))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,6 +1093,19 @@ mod tests {
         for (k, ru, en) in TABLE {
             assert!(!ru.is_empty() && !en.is_empty(), "{k} is empty");
         }
+    }
+
+    #[test]
+    fn settings_search_matches_translations_and_all_words() {
+        assert!(settings_matches("", &["set.ui_scale"]));
+        assert!(settings_matches(" \t\n ", &[]));
+        assert!(settings_matches("МАСШТАБ", &["set.ui_scale"]));
+        assert!(settings_matches("INTERFACE", &["set.ui_scale"]));
+        assert!(settings_matches("scale интерфейса", &["set.ui_scale"]));
+        assert!(settings_matches("set.ui_scale", &["set.ui_scale"]));
+        assert!(!settings_matches("scale nonexistent", &["set.ui_scale"]));
+        assert!(!settings_matches("scale", &["hist."]));
+        assert!(!settings_matches("scale", &[]));
     }
 
     #[test]
@@ -996,9 +1130,9 @@ mod tests {
     /// Every dotted key used in the UI sources must exist in the table (so nothing shows up as a raw key).
     #[test]
     fn all_keys_used_in_the_sources_exist() {
-        const PREFIXES: [&str; 14] = [
+        const PREFIXES: [&str; 15] = [
             "act.", "common.", "ed.", "err.", "hist.", "home.", "inst.", "nav.", "sel.", "set.", "tool.", "tray.",
-            "uninst.", "upd.",
+            "uninst.", "upd.", "ws.",
         ];
         let sources = [
             include_str!("views.rs"),
@@ -1007,11 +1141,13 @@ mod tests {
             include_str!("capture_flow.rs"),
             include_str!("tray.rs"),
             include_str!("main.rs"),
+            include_str!("workspace_ui.rs"),
         ];
         let mut missing = Vec::new();
         for src in sources {
             for part in src.split('"').skip(1).step_by(2) {
                 let is_key = PREFIXES.iter().any(|p| part.starts_with(p))
+                    && !part.ends_with(['.', '_'])
                     && part
                         .bytes()
                         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'_');

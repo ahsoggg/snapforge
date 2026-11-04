@@ -24,6 +24,7 @@ mod tray;
 mod update;
 mod views;
 mod winint;
+mod workspace_ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -119,6 +120,8 @@ pub struct App {
     pub rec_secs: u64,
     pub last_video: Option<PathBuf>,
     pub update: update::Shared,
+    update_attempt: Option<Instant>,
+    update_pending: bool,
     pub monitors: Vec<Monitor>,
     pub monitor_choice: usize,
     pub search: String,
@@ -133,6 +136,9 @@ pub struct App {
     pub quit: bool,
     /// One-shot scroll position for the settings page (used by the screenshot tour).
     pub settings_scroll: Option<f32>,
+    pub settings_search: String,
+    pub workspace_name: String,
+    pub editor_key_text: Vec<String>,
     /// Frames left before the window hides itself to the tray (start with `--minimized`).
     pub hide_after_frames: Option<u8>,
     pub desktop_shortcut: bool,
@@ -152,6 +158,10 @@ impl App {
         } else {
             Settings::load()
         };
+        let workspace_name = settings
+            .active_workspace
+            .and_then(|i| settings.workspace_profiles.get(i))
+            .map_or_else(String::new, |p| p.name.clone());
         let history = History::open(&paths::history_dir());
         if matches!(mode, Mode::App) {
             cc.egui_ctx.set_zoom_factor(settings.ui_scale as f32 / 100.0);
@@ -207,6 +217,8 @@ impl App {
             rec_secs: 0,
             last_video: None,
             update: Arc::new(Mutex::new(update::State::Idle)),
+            update_attempt: None,
+            update_pending: false,
             monitors: sys::monitors(),
             monitor_choice: 0,
             search: String::new(),
@@ -219,6 +231,9 @@ impl App {
             demo_counter: 0,
             quit: false,
             settings_scroll: None,
+            settings_search: String::new(),
+            workspace_name,
+            editor_key_text: Vec::new(),
             hide_after_frames: None,
             desktop_shortcut: true,
             flags,
@@ -334,17 +349,45 @@ impl App {
     }
 
     pub fn maybe_check_update(&mut self, ctx: &egui::Context) {
+        let state = self.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let now = unix_now();
+        if self.update_pending {
+            match state {
+                update::State::Checking | update::State::Downloading { .. } => return,
+                update::State::UpToDate | update::State::Available { .. } | update::State::Ready { .. } => {
+                    self.settings.last_update_check = now;
+                    self.update_pending = false;
+                    self.save_settings();
+                }
+                _ => self.update_pending = false,
+            }
+        }
         if !self.settings.check_updates || self.flags.demo {
             return;
         }
-        let now = unix_now();
-        if now.saturating_sub(self.settings.last_update_check) < update::CHECK_INTERVAL_SECS {
+        ctx.request_repaint_after(Duration::from_secs(60));
+        if update_due(
+            self.settings.last_update_check,
+            now,
+            self.update_attempt.map(|t| t.elapsed()),
+            &state,
+        ) {
+            self.begin_update(ctx, false, self.settings.auto_install_updates);
+        }
+    }
+
+    pub fn begin_update(&mut self, ctx: &egui::Context, install: bool, auto_install: bool) {
+        if self.flags.demo {
             return;
         }
-        self.settings.last_update_check = now;
-        self.save_settings();
+        self.update_attempt = Some(Instant::now());
+        self.update_pending = true;
         let ctx = ctx.clone();
-        update::check(self.update.clone(), false, move || ctx.request_repaint());
+        if install {
+            update::install(self.update.clone(), move || ctx.request_repaint());
+        } else {
+            update::check(self.update.clone(), auto_install, move || ctx.request_repaint());
+        }
     }
 
     pub fn thumb(&mut self, ctx: &egui::Context, id: &str) -> Option<TextureHandle> {
@@ -439,11 +482,21 @@ fn icon_image() -> Option<egui::ColorImage> {
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if matches!(&self.mode, Mode::App) {
+            self.maybe_check_update(ctx);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         match &self.mode {
             Mode::Install(_) | Mode::Uninstall(_) => self.installer_ui(ui),
             Mode::App => {
+                let spacing = if self.settings.compact_ui { 3.0 } else { 6.0 };
+                if ctx.style_of(egui::Theme::Dark).spacing.item_spacing.y != spacing {
+                    theme::set_compact(&ctx, self.settings.compact_ui);
+                }
                 self.handle_events(&ctx);
                 self.app_ui(ui);
                 self.tour_step(&ctx);
@@ -567,5 +620,52 @@ pub fn lang_name(l: Lang) -> &'static str {
     match l {
         Lang::Ru => "Русский",
         Lang::En => "English",
+    }
+}
+
+fn update_due(last_success: u64, now: u64, since_attempt: Option<Duration>, state: &update::State) -> bool {
+    if matches!(
+        state,
+        update::State::Checking | update::State::Downloading { .. } | update::State::Ready { .. }
+    ) {
+        return false;
+    }
+    let Some(elapsed) = since_attempt else { return true };
+    if matches!(state, update::State::Failed(_) | update::State::InstallFailed { .. }) {
+        return elapsed >= Duration::from_secs(300);
+    }
+    now.saturating_sub(last_success) >= update::CHECK_INTERVAL_SECS
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    #[test]
+    fn checks_on_launch_retries_failures_and_preserves_inflight_updates() {
+        let now = 100_000;
+        assert!(update_due(now - 60, now, None, &update::State::Idle));
+        let failed = update::State::Failed("offline".into());
+        assert!(!update_due(now - 60, now, Some(Duration::from_secs(299)), &failed));
+        assert!(update_due(now - 60, now, Some(Duration::from_secs(300)), &failed));
+        assert!(!update_due(0, now, None, &update::State::Checking));
+        assert!(!update_due(
+            0,
+            now,
+            None,
+            &update::State::Ready { version: "1.0".into() }
+        ));
+        assert!(!update_due(
+            now,
+            now,
+            Some(Duration::from_secs(60)),
+            &update::State::UpToDate
+        ));
+        assert!(update_due(
+            1,
+            now,
+            Some(Duration::from_secs(now)),
+            &update::State::UpToDate
+        ));
     }
 }

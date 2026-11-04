@@ -184,6 +184,12 @@ pub struct Settings {
     pub editor_show_properties: bool,
     pub editor_tools_width: u16,
     pub editor_properties_width: u16,
+    pub compact_ui: bool,
+    pub editor_tools_right: bool,
+    pub editor_keys: Vec<(String, String)>,
+    pub workspace_profiles: Vec<crate::workspace::WorkspaceProfile>,
+    pub active_workspace: Option<usize>,
+    pub auto_install_updates: bool,
     pub save_dir: PathBuf,
     pub name_template: String,
     pub format: ImageFormat,
@@ -246,6 +252,12 @@ impl Default for Settings {
             editor_show_properties: true,
             editor_tools_width: 140,
             editor_properties_width: 280,
+            compact_ui: false,
+            editor_tools_right: false,
+            editor_keys: crate::workspace::default_editor_keys(),
+            workspace_profiles: Vec::new(),
+            active_workspace: None,
+            auto_install_updates: true,
             save_dir: paths::default_pictures_dir(),
             name_template: naming::DEFAULT_TEMPLATE.to_owned(),
             format: ImageFormat::Png,
@@ -325,6 +337,8 @@ impl Settings {
         self.editor_zoom_speed = self.editor_zoom_speed.clamp(25, 200);
         self.editor_tools_width = self.editor_tools_width.clamp(140, 240);
         self.editor_properties_width = self.editor_properties_width.clamp(200, 420);
+        crate::workspace::sanitize_editor_keys(&mut self.editor_keys);
+        self.sanitize_workspaces();
         self.post.sanitize();
         self.overlay_width = self.overlay_width.clamp(1.0, 24.0);
         self.overlay_dim = self.overlay_dim.min(90);
@@ -394,6 +408,59 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_profiles_are_user_named_independent_and_persistent() {
+        let mut s = Settings {
+            ui_scale: 125,
+            ..Settings::default()
+        };
+        s.create_workspace("Drawing").unwrap();
+        s.ui_scale = 90;
+        s.compact_ui = true;
+        s.create_workspace("Small screen").unwrap();
+        let save_dir = s.save_dir.clone();
+        s.activate_workspace(0).unwrap();
+        assert_eq!(s.ui_scale, 125);
+        assert!(!s.compact_ui);
+        assert_eq!(s.save_dir, save_dir);
+        s.ui_scale = 150;
+        s.save_workspace().unwrap();
+        s.rename_workspace("Art").unwrap();
+        assert_eq!(s.workspace_profiles[0].name, "Art");
+        assert!(s.create_workspace("  Art ").is_err());
+        assert!(s.rename_workspace(" ").is_err());
+        assert!(s.activate_workspace(50).is_err());
+        let mut loaded: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        loaded.sanitize();
+        assert_eq!(loaded.active_workspace, Some(0));
+        loaded.activate_workspace(1).unwrap();
+        assert!(loaded.compact_ui);
+        loaded.remove_workspace().unwrap();
+        assert_eq!(loaded.workspace_profiles.len(), 1);
+        assert_eq!(loaded.active_workspace, None);
+        loaded.activate_workspace(0).unwrap();
+        assert_eq!(loaded.ui_scale, 150);
+    }
+
+    #[test]
+    fn editor_shortcuts_are_validated_without_losing_custom_bindings() {
+        let mut s = Settings {
+            editor_keys: vec![
+                ("tool.pencil".into(), "Q".into()),
+                ("tool.rect".into(), "Q".into()),
+                ("tool.line".into(), "Escape".into()),
+                ("tool.arrow".into(), String::new()),
+            ],
+            ..Settings::default()
+        };
+        s.sanitize();
+        assert_eq!(s.editor_key("tool.pencil"), "Q");
+        assert_eq!(s.editor_key("tool.rect"), "");
+        assert_eq!(s.editor_key("tool.line"), "L");
+        assert_eq!(s.editor_key("tool.arrow"), "");
+        assert_eq!(s.editor_keys.len(), crate::workspace::EDITOR_SHORTCUTS.len());
+    }
 
     #[test]
     fn interface_settings_migrate_roundtrip_and_stay_usable() {

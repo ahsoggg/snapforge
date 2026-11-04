@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
+use snapforge_core::diag;
 
-const API: &str = "https://api.github.com/repos/ahsoggg-creator/snapforge/releases/latest";
+const API: &str = "https://api.github.com/repos/ahsoggg/snapforge/releases/latest";
 const EXE_ASSET: &str = "SnapForge.exe";
 const SUM_ASSET: &str = "SHA256SUMS.txt";
 /// Check at most once a day.
@@ -60,9 +61,6 @@ fn agent(timeout_secs: u64) -> ureq::Agent {
         .provider(ureq::tls::TlsProvider::NativeTls)
         .build();
     let builder = ureq::Agent::config_builder().tls_config(tls);
-    // tests talk to 127.0.0.1: never through a system proxy (real runs keep ureq's environment proxy handling)
-    #[cfg(test)]
-    let builder = builder.proxy(None);
     builder
         .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
         .timeout_connect(Some(std::time::Duration::from_secs(20)))
@@ -143,6 +141,7 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 pub fn latest() -> Result<Release, String> {
+    diag::log(diag::Level::Info, "update: checking GitHub release");
     let call = || {
         agent(30)
             .get(API)
@@ -177,6 +176,10 @@ pub fn latest() -> Result<Release, String> {
     };
     let (exe_url, exe_size) = asset(EXE_ASSET).ok_or("the release has no SnapForge.exe")?;
     let (sum_url, _) = asset(SUM_ASSET).ok_or("the release has no SHA256SUMS.txt")?;
+    diag::log(
+        diag::Level::Info,
+        &format!("update: release {tag}, executable {exe_size} bytes"),
+    );
     Ok(Release {
         version: tag.trim_start_matches('v').to_owned(),
         page: v["html_url"].as_str().unwrap_or(crate::winint::REPO_URL).to_owned(),
@@ -258,6 +261,7 @@ fn download(rel: &Release, state: &Shared, repaint: &dyn Fn()) -> Result<(), Str
 
 /// Downloads, verifies and swaps in the new exe in place of `exe`.
 fn download_to(rel: &Release, state: &Shared, repaint: &dyn Fn(), exe: &Path) -> Result<(), String> {
+    diag::log(diag::Level::Info, &format!("update: downloading {}", rel.version));
     let tmp = exe.with_extension("exe.download");
     let expected = parse_sums(&get_text(&rel.sum_url)?)
         .remove(EXE_ASSET)
@@ -275,7 +279,12 @@ fn download_to(rel: &Release, state: &Shared, repaint: &dyn Fn(), exe: &Path) ->
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, exe)
+    swap_in(&tmp, exe)?;
+    diag::log(
+        diag::Level::Info,
+        &format!("update: installed {}, restart required", rel.version),
+    );
+    Ok(())
 }
 
 fn set_downloading(state: &Shared, rel: &Release, done: u64) {
@@ -365,14 +374,47 @@ fn restart(tmp: &Path) -> Result<(std::fs::File, Sha256, u64), String> {
     Ok((f, Sha256::new(), 0))
 }
 
+fn begin(state: &Shared, repaint: &dyn Fn()) -> bool {
+    let mut current = state.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(
+        *current,
+        State::Checking | State::Downloading { .. } | State::Ready { .. }
+    ) {
+        return false;
+    }
+    *current = State::Checking;
+    drop(current);
+    repaint();
+    true
+}
+
+fn log_state(state: &State) {
+    match state {
+        State::Failed(error) | State::InstallFailed { error, .. } => {
+            diag::log(diag::Level::Warn, &format!("update: {error}"));
+        }
+        State::UpToDate => diag::log(diag::Level::Info, "update: already up to date"),
+        State::Available { version, .. } => {
+            diag::log(
+                diag::Level::Info,
+                &format!("update: {version} available for manual installation"),
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Checks for a newer release. With `auto_install` it also downloads, verifies and swaps the exe.
 pub fn check(state: Shared, auto_install: bool, repaint: impl Fn() + Send + 'static) {
+    if !begin(&state, &repaint) {
+        return;
+    }
     std::thread::spawn(move || {
         let set = |s: State| {
+            log_state(&s);
             *state.lock().unwrap_or_else(|e| e.into_inner()) = s;
             repaint();
         };
-        set(State::Checking);
         match latest() {
             Err(e) => set(State::Failed(e)),
             Ok(rel) if !is_newer(&rel.version, env!("CARGO_PKG_VERSION")) => set(State::UpToDate),
@@ -402,8 +444,12 @@ pub fn check(state: Shared, auto_install: bool, repaint: impl Fn() + Send + 'sta
 
 /// Installs an update that `check` found (button "Update").
 pub fn install(state: Shared, repaint: impl Fn() + Send + 'static) {
+    if !begin(&state, &repaint) {
+        return;
+    }
     std::thread::spawn(move || {
         let set = |s: State| {
+            log_state(&s);
             *state.lock().unwrap_or_else(|e| e.into_inner()) = s;
             repaint();
         };
@@ -451,6 +497,73 @@ pub fn run_headless() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_does_not_interrupt_an_active_download() {
+        let downloading = State::Downloading {
+            version: "9.9.9".into(),
+            done: 123,
+            total: 456,
+        };
+        let state = Arc::new(Mutex::new(downloading.clone()));
+        let (sent, received) = std::sync::mpsc::channel();
+        check(state.clone(), false, move || {
+            let _ = sent.send(());
+        });
+        assert!(received.recv_timeout(std::time::Duration::from_millis(200)).is_err());
+        assert_eq!(*state.lock().unwrap(), downloading);
+    }
+
+    #[test]
+    fn only_one_update_operation_can_start_and_ready_is_preserved() {
+        let state = Arc::new(Mutex::new(State::Idle));
+        assert!(begin(&state, &|| {}));
+        assert_eq!(*state.lock().unwrap(), State::Checking);
+        assert!(!begin(&state, &|| {}));
+        *state.lock().unwrap() = State::Ready {
+            version: "9.9.9".into(),
+        };
+        install(state.clone(), || panic!("a ready update must not be overwritten"));
+        assert_eq!(
+            *state.lock().unwrap(),
+            State::Ready {
+                version: "9.9.9".into()
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "downloads the live GitHub release and swaps only a temporary copy of the installed executable"]
+    fn live_github_release_updates_a_scratch_copy() {
+        let dir = std::env::temp_dir().join("snapforge-updater-20261105");
+        std::fs::create_dir_all(&dir).unwrap();
+        let installed =
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Programs/SnapForge/SnapForge.exe");
+        let exe = dir.join("SnapForge.exe");
+        std::fs::copy(&installed, &exe).unwrap();
+        let original = sha256_file(&exe).unwrap();
+        let rel = latest().expect("live GitHub release");
+        let state = Arc::new(Mutex::new(State::Idle));
+        download_to(&rel, &state, &|| {}, &exe).expect("verified live release download and scratch swap");
+        assert_eq!(sha256_file(&exe.with_extension("exe.old")).unwrap(), original);
+        assert_eq!(
+            sha256_file(&installed).unwrap(),
+            original,
+            "installed app stays untouched"
+        );
+        assert_eq!(std::fs::metadata(&exe).unwrap().len(), rel.exe_size);
+        assert!(!exe.with_extension("exe.download").exists());
+        std::fs::write(
+            dir.join("verified-update.txt"),
+            format!(
+                "version={}\nsha256={}\nbackup_sha256={original}\nbytes={}\n",
+                rel.version,
+                sha256_file(&exe).unwrap(),
+                rel.exe_size
+            ),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn versions_compare_numerically() {

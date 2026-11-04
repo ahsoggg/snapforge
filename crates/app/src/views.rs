@@ -87,7 +87,7 @@ impl App {
             update::State::Available { version, url } => {
                 if theme::primary_button(ui, &self.tf("upd.available", &[("v", version)])).clicked() {
                     let ctx = ui.ctx().clone();
-                    update::install(self.update.clone(), move || ctx.request_repaint());
+                    self.begin_update(&ctx, true, false);
                 }
                 if ui.small_button(tr(lang, "upd.notes")).clicked() {
                     winint::open_url(&url);
@@ -104,17 +104,25 @@ impl App {
             update::State::InstallFailed { version, error } => {
                 if theme::primary_button(ui, &self.tf("upd.retry", &[("v", version)])).clicked() {
                     let ctx = ui.ctx().clone();
-                    update::install(self.update.clone(), move || ctx.request_repaint());
+                    self.begin_update(&ctx, true, false);
                 }
                 ui.label(RichText::new(tr(lang, "upd.failed")).color(theme::BAD))
                     .on_hover_text(error);
             }
             update::State::Ready { version } => {
                 if theme::primary_button(ui, &self.tf("upd.restart", &[("v", version)])).clicked() {
-                    if let Ok(exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(exe).arg("--restarted").spawn();
+                    let result = std::env::current_exe()
+                        .and_then(|exe| std::process::Command::new(exe).arg("--restarted").spawn());
+                    match result {
+                        Ok(_) => self.quit = true,
+                        Err(error) => self.notify(format!("{}: {error}", tr(lang, "upd.restart_failed")), true),
                     }
-                    self.quit = true;
+                }
+            }
+            update::State::Failed(error) => {
+                if ui.button(tr(lang, "upd.retry_check")).on_hover_text(error).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.begin_update(&ctx, false, self.settings.auto_install_updates);
                 }
             }
             _ => {}
@@ -429,186 +437,312 @@ impl App {
         let lang = self.settings.language;
         let ctx = ui.ctx().clone();
         let mut changed = false;
+        ui.label(RichText::new(tr(lang, "set.title")).size(20.0).strong());
+        let search_changed = ui
+            .horizontal(|ui| {
+                let mut changed = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.settings_search)
+                            .hint_text(tr(lang, "ws.search"))
+                            .desired_width(ui.available_width() - 40.0),
+                    )
+                    .changed();
+                if ui.small_button("×").clicked() {
+                    self.settings_search.clear();
+                    changed = true;
+                }
+                changed
+            })
+            .inner;
+        if search_changed {
+            self.settings_scroll = Some(0.0);
+        }
+        let query = self.settings_search.clone();
+        let matches = |prefixes: &[&str]| crate::i18n::settings_matches(&query, prefixes);
+        let mut shown = 0;
         let mut area = egui::ScrollArea::vertical();
         if let Some(y) = self.settings_scroll.take() {
             area = area.vertical_scroll_offset(y);
         }
         area.show(ui, |ui| {
-            ui.label(RichText::new(tr(lang, "set.title")).size(20.0).strong());
             ui.add_space(6.0);
-            theme::card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(tr(lang, "set.general")).strong());
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.ui_scale, 75..=200)
-                            .suffix("%")
-                            .text(tr(lang, "set.ui_scale")),
-                    )
-                    .changed()
-                {
-                    ctx.set_zoom_factor(self.settings.ui_scale as f32 / 100.0);
-                    changed = true;
-                }
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.editor_zoom_speed, 25..=200)
-                            .suffix("%")
-                            .text(tr(lang, "set.zoom_speed")),
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut self.settings.editor_show_properties,
-                        tr(lang, "set.editor_properties"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.editor_tools_width, 140..=240)
-                            .text(tr(lang, "set.tools_width")),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.editor_properties_width, 200..=420)
-                            .text(tr(lang, "set.properties_width")),
-                    )
-                    .changed();
-                if ui.button(tr(lang, "set.interface_reset")).clicked() {
-                    let defaults = snapforge_core::settings::Settings::default();
-                    self.settings.ui_scale = defaults.ui_scale;
-                    self.settings.editor_zoom_speed = defaults.editor_zoom_speed;
-                    self.settings.editor_show_properties = defaults.editor_show_properties;
-                    self.settings.editor_tools_width = defaults.editor_tools_width;
-                    self.settings.editor_properties_width = defaults.editor_properties_width;
-                    ctx.set_zoom_factor(1.0);
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label(tr(lang, "set.language"));
-                    let before = self.settings.language;
-                    egui::ComboBox::from_id_salt("lang")
-                        .selected_text(crate::lang_name(self.settings.language))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.settings.language, Lang::Ru, "Русский");
-                            ui.selectable_value(&mut self.settings.language, Lang::En, "English");
-                        });
-                    if before != self.settings.language {
-                        changed = true;
-                        self.localize_preset_names();
-                        if !self.flags.demo {
-                            self.tray = crate::tray::Tray::new(&ctx, self.settings.language, self.recorder.is_some())
-                                .or(self.tray.take());
-                        }
-                    }
-                });
-                changed |= ui
-                    .checkbox(&mut self.settings.minimize_to_tray, tr(lang, "set.tray"))
-                    .changed();
-                let mut auto = winint::autostart_enabled();
-                if ui.checkbox(&mut auto, tr(lang, "set.autostart")).changed() && !self.flags.demo {
-                    match winint::set_autostart(auto) {
-                        Ok(()) => {
-                            self.settings.autostart = auto;
-                            changed = true;
-                        }
-                        Err(e) => self.notify(e, true),
-                    }
-                }
-            });
-            ui.add_space(8.0);
-
-            self.hotkeys_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.overlay_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.video_card(ui, &mut changed);
-            ui.add_space(8.0);
-
-            theme::card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(tr(lang, "set.saving")).strong());
-                ui.horizontal(|ui| {
-                    ui.label(tr(lang, "set.folder"));
-                    ui.label(self.settings.save_dir.display().to_string());
-                    if ui.button(tr(lang, "set.choose")).clicked()
-                        && let Some(d) = rfd::FileDialog::new()
-                            .set_directory(&self.settings.save_dir)
-                            .pick_folder()
+            if matches(&["ws.title", "ws.name", "ws.create", "ws.save", "ws.rename", "ws.delete"]) {
+                shown += 1;
+                self.workspace_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&["ws.editor_tools", "ws.keys_", "tool."]) {
+                shown += 1;
+                egui::CollapsingHeader::new(tr(lang, "ws.editor_tools"))
+                    .open((!query.trim().is_empty()).then_some(true))
+                    .show(ui, |ui| self.editor_keys_card(ui, &mut changed));
+                ui.add_space(8.0);
+            }
+            if matches(&[
+                "set.general",
+                "set.interface_reset",
+                "set.ui_scale",
+                "set.zoom_speed",
+                "set.editor_properties",
+                "set.tools_width",
+                "set.properties_width",
+                "set.language",
+                "set.autostart",
+                "set.tray",
+                "ws.compact",
+                "ws.tools_right",
+            ]) {
+                shown += 1;
+                theme::card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(tr(lang, "set.general")).strong());
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.settings.ui_scale, 75..=200)
+                                .suffix("%")
+                                .text(tr(lang, "set.ui_scale")),
+                        )
+                        .changed()
                     {
-                        self.settings.save_dir = d;
+                        ctx.set_zoom_factor(self.settings.ui_scale as f32 / 100.0);
                         changed = true;
                     }
-                    if ui.button(tr(lang, "set.open_folder")).clicked() {
-                        let _ = std::fs::create_dir_all(&self.settings.save_dir);
-                        winint::open_path(&self.settings.save_dir);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(tr(lang, "set.template"));
-                    changed |= ui
-                        .add(egui::TextEdit::singleline(&mut self.settings.name_template).desired_width(260.0))
-                        .changed();
-                    let preview = naming::expand(
-                        &self.settings.name_template,
-                        "chrome",
-                        chrono::Local::now().naive_local(),
-                    );
-                    ui.label(RichText::new(format!("= {preview}.{}", self.settings.format.ext())).weak());
-                });
-                ui.label(RichText::new(tr(lang, "set.template_help")).weak().small());
-                ui.horizontal(|ui| {
-                    ui.label(tr(lang, "set.format"));
-                    changed |= ui
-                        .selectable_value(&mut self.settings.format, ImageFormat::Png, "PNG")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut self.settings.format, ImageFormat::Jpeg, "JPEG")
-                        .changed();
-                    if self.settings.format == ImageFormat::Jpeg {
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut self.settings.jpeg_quality, 40..=100)
-                                    .text(tr(lang, "set.quality")),
-                            )
-                            .changed();
-                    }
-                });
-            });
-            ui.add_space(8.0);
-
-            theme::card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(tr(lang, "set.history")).strong());
-                changed |= ui
-                    .checkbox(&mut self.settings.history_enabled, tr(lang, "set.history_on"))
-                    .changed();
-                ui.horizontal(|ui| {
-                    ui.label(tr(lang, "set.retention"));
                     changed |= ui
                         .add(
-                            egui::DragValue::new(&mut self.settings.history_retention_days)
-                                .range(0..=3650)
-                                .suffix(tr(lang, "set.days")),
+                            egui::Slider::new(&mut self.settings.editor_zoom_speed, 25..=200)
+                                .suffix("%")
+                                .text(tr(lang, "set.zoom_speed")),
                         )
                         .changed();
-                    ui.label(RichText::new(tr(lang, "set.retention_hint")).weak().small());
+                    changed |= ui
+                        .checkbox(
+                            &mut self.settings.editor_show_properties,
+                            tr(lang, "set.editor_properties"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.settings.editor_tools_width, 140..=240)
+                                .text(tr(lang, "set.tools_width")),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.settings.editor_properties_width, 200..=420)
+                                .text(tr(lang, "set.properties_width")),
+                        )
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.settings.compact_ui, tr(lang, "ws.compact"))
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.settings.editor_tools_right, tr(lang, "ws.tools_right"))
+                        .changed();
+                    if ui.button(tr(lang, "set.interface_reset")).clicked() {
+                        let defaults = snapforge_core::settings::Settings::default();
+                        self.settings.ui_scale = defaults.ui_scale;
+                        self.settings.editor_zoom_speed = defaults.editor_zoom_speed;
+                        self.settings.editor_show_properties = defaults.editor_show_properties;
+                        self.settings.editor_tools_width = defaults.editor_tools_width;
+                        self.settings.editor_properties_width = defaults.editor_properties_width;
+                        self.settings.compact_ui = defaults.compact_ui;
+                        self.settings.editor_tools_right = defaults.editor_tools_right;
+                        ctx.set_zoom_factor(1.0);
+                        changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "set.language"));
+                        let before = self.settings.language;
+                        egui::ComboBox::from_id_salt("lang")
+                            .selected_text(crate::lang_name(self.settings.language))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.settings.language, Lang::Ru, "Русский");
+                                ui.selectable_value(&mut self.settings.language, Lang::En, "English");
+                            });
+                        if before != self.settings.language {
+                            changed = true;
+                            self.localize_preset_names();
+                            if !self.flags.demo {
+                                self.tray =
+                                    crate::tray::Tray::new(&ctx, self.settings.language, self.recorder.is_some())
+                                        .or(self.tray.take());
+                            }
+                        }
+                    });
+                    changed |= ui
+                        .checkbox(&mut self.settings.minimize_to_tray, tr(lang, "set.tray"))
+                        .changed();
+                    let mut auto = winint::autostart_enabled();
+                    if ui.checkbox(&mut auto, tr(lang, "set.autostart")).changed() && !self.flags.demo {
+                        match winint::set_autostart(auto) {
+                            Ok(()) => {
+                                self.settings.autostart = auto;
+                                changed = true;
+                            }
+                            Err(e) => self.notify(e, true),
+                        }
+                    }
                 });
-                if ui.button(tr(lang, "hist.clear")).clicked() {
-                    self.confirm_clear = true;
-                    self.view = View::History;
-                }
-            });
-            ui.add_space(8.0);
+                ui.add_space(8.0);
+            }
 
-            self.post_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.uploads_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.updates_card(ui, &mut changed);
-            ui.add_space(8.0);
-            self.system_card(ui);
+            if matches(&[
+                "set.hotkeys",
+                "set.profile",
+                "set.record",
+                "set.taken",
+                "set.apply_hotkeys",
+                "set.reset_hotkeys",
+                "act.",
+            ]) {
+                shown += 1;
+                self.hotkeys_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&[
+                "set.overlay",
+                "set.ov_",
+                "set.drawing_color",
+                "otool.",
+                "ed.width",
+                "set.sound",
+            ]) {
+                shown += 1;
+                self.overlay_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&["set.video"]) {
+                shown += 1;
+                self.video_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+
+            if matches(&["set.saving", "set.folder", "set.template", "set.format", "set.quality"]) {
+                shown += 1;
+                theme::card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(tr(lang, "set.saving")).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "set.folder"));
+                        ui.label(self.settings.save_dir.display().to_string());
+                        if ui.button(tr(lang, "set.choose")).clicked()
+                            && let Some(d) = rfd::FileDialog::new()
+                                .set_directory(&self.settings.save_dir)
+                                .pick_folder()
+                        {
+                            self.settings.save_dir = d;
+                            changed = true;
+                        }
+                        if ui.button(tr(lang, "set.open_folder")).clicked() {
+                            let _ = std::fs::create_dir_all(&self.settings.save_dir);
+                            winint::open_path(&self.settings.save_dir);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "set.template"));
+                        changed |= ui
+                            .add(egui::TextEdit::singleline(&mut self.settings.name_template).desired_width(260.0))
+                            .changed();
+                        let preview = naming::expand(
+                            &self.settings.name_template,
+                            "chrome",
+                            chrono::Local::now().naive_local(),
+                        );
+                        ui.label(RichText::new(format!("= {preview}.{}", self.settings.format.ext())).weak());
+                    });
+                    ui.label(RichText::new(tr(lang, "set.template_help")).weak().small());
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "set.format"));
+                        changed |= ui
+                            .selectable_value(&mut self.settings.format, ImageFormat::Png, "PNG")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut self.settings.format, ImageFormat::Jpeg, "JPEG")
+                            .changed();
+                        if self.settings.format == ImageFormat::Jpeg {
+                            changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut self.settings.jpeg_quality, 40..=100)
+                                        .text(tr(lang, "set.quality")),
+                                )
+                                .changed();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
+
+            if matches(&["set.history", "set.retention", "hist.clear"]) {
+                shown += 1;
+                theme::card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(tr(lang, "set.history")).strong());
+                    changed |= ui
+                        .checkbox(&mut self.settings.history_enabled, tr(lang, "set.history_on"))
+                        .changed();
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "set.retention"));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.settings.history_retention_days)
+                                    .range(0..=3650)
+                                    .suffix(tr(lang, "set.days")),
+                            )
+                            .changed();
+                        ui.label(RichText::new(tr(lang, "set.retention_hint")).weak().small());
+                    });
+                    if ui.button(tr(lang, "hist.clear")).clicked() {
+                        self.confirm_clear = true;
+                        self.view = View::History;
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            if matches(&[
+                "set.post",
+                "set.preset_",
+                "set.beautify",
+                "set.wm_",
+                "set.downscale_pct",
+                "set.hide_style",
+                "set.style_",
+                "set.ocr_",
+                "set.face_",
+                "set.model_",
+                "post.",
+                "bg.",
+            ]) {
+                shown += 1;
+                self.post_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&["up."]) {
+                shown += 1;
+                self.uploads_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&["set.updates", "upd."]) {
+                shown += 1;
+                self.updates_card(ui, &mut changed);
+                ui.add_space(8.0);
+            }
+            if matches(&[
+                "set.system",
+                "set.portable",
+                "set.install",
+                "set.run_admin",
+                "set.diagnostics",
+                "set.diag_",
+                "set.open_logs",
+                "set.copy_diag",
+            ]) {
+                shown += 1;
+                self.system_card(ui);
+            }
+            if shown == 0 {
+                ui.label(tr(lang, "ws.no_results"));
+            }
         });
         self.uploads_confirm(&ctx, &mut changed);
         if changed {
@@ -781,6 +915,9 @@ impl App {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(tr(lang, "set.updates")).strong());
             *changed |= ui
+                .checkbox(&mut self.settings.auto_install_updates, tr(lang, "upd.auto_install"))
+                .changed();
+            *changed |= ui
                 .checkbox(&mut self.settings.check_updates, tr(lang, "set.updates_on"))
                 .changed();
             ui.label(RichText::new(tr(lang, "set.updates_note")).weak().small());
@@ -797,13 +934,16 @@ impl App {
                 }
             };
             ui.horizontal_wrapped(|ui| {
-                let busy = matches!(state, update::State::Checking | update::State::Downloading { .. });
+                let busy = matches!(
+                    state,
+                    update::State::Checking | update::State::Downloading { .. } | update::State::Ready { .. }
+                );
                 if ui
                     .add_enabled(!self.flags.demo && !busy, egui::Button::new(tr(lang, "upd.check_now")))
                     .clicked()
                 {
                     let ctx = ui.ctx().clone();
-                    update::check(self.update.clone(), false, move || ctx.request_repaint());
+                    self.begin_update(&ctx, false, self.settings.auto_install_updates);
                 }
                 if matches!(
                     state,
@@ -811,7 +951,7 @@ impl App {
                 ) && ui.button(tr(lang, "upd.install")).clicked()
                 {
                     let ctx = ui.ctx().clone();
-                    update::install(self.update.clone(), move || ctx.request_repaint());
+                    self.begin_update(&ctx, true, false);
                 }
                 if let update::State::Downloading { done, total, .. } = state {
                     ui.add(
