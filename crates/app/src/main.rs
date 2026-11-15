@@ -596,15 +596,36 @@ fn main() -> eframe::Result {
     if !matches!(mode, Mode::App) {
         viewport = viewport.with_resizable(false).with_maximize_button(false);
     }
-    let opts = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
+    // OpenGL (glow) keeps the idle footprint about three times smaller than wgpu, but needs a real GL driver.
+    // Where the GL context cannot be created (virtual machines, remote sessions) fall back to wgpu, which can
+    // use the software rasteriser. The payload stays in its slot until the app is actually created.
+    let payload = Arc::new(Mutex::new(Some((mode, flags))));
+    let run = |renderer: eframe::Renderer| {
+        let opts = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            renderer,
+            ..Default::default()
+        };
+        let payload = payload.clone();
+        eframe::run_native(
+            "SnapForge",
+            opts,
+            Box::new(move |cc| {
+                let (mode, flags) = payload.lock().unwrap().take().ok_or("the app was already created")?;
+                Ok(Box::new(App::new(cc, mode, flags)))
+            }),
+        )
     };
-    eframe::run_native(
-        "SnapForge",
-        opts,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, mode, flags)))),
-    )
+    match run(eframe::Renderer::Glow) {
+        Err(e) if payload.lock().unwrap().is_some() => {
+            core_diag::log(
+                core_diag::Level::Warn,
+                &format!("OpenGL renderer failed ({e}); falling back to wgpu"),
+            );
+            run(eframe::Renderer::Wgpu)
+        }
+        r => r,
+    }
 }
 
 /// A GUI-subsystem exe has no console; attach to the parent's so `--update` / `--screenshots` can print.
